@@ -1,5 +1,7 @@
 # pose-cam
 
+[日本語版 README](README.ja.md)
+
 Browser-based real-time pose, hand, and face detection — no server required.
 
 **Live demo**: https://ota.github.io/pose-cam/
