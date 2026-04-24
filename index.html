@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Pose Detection</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: -apple-system, sans-serif; }
+
+    #container {
+      position: relative;
+      width: 100vw;
+      height: 100svh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    video {
+      position: absolute;
+      width: 1px; height: 1px;
+      opacity: 0; pointer-events: none;
+    }
+
+    #canvas {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    #canvas.mirrored { transform: scaleX(-1); }
+
+    /* Controls panel */
+    #controls {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 14px;
+      padding: 8px 12px;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+      z-index: 10;
+      max-width: calc(100vw - 24px);
+    }
+
+    .model-btn {
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 8px;
+      padding: 5px 11px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      white-space: nowrap;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .model-btn:hover { background: rgba(255,255,255,0.2); }
+    .model-btn.active { background: #1a73e8; border-color: #1a73e8; }
+    .model-btn:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+
+    .divider { width: 1px; height: 20px; background: rgba(255,255,255,0.2); flex-shrink: 0; }
+
+    .icon-btn {
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 8px;
+      padding: 5px 9px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .icon-btn:hover { background: rgba(255,255,255,0.2); }
+    .icon-btn.active { background: rgba(255,200,0,0.3); border-color: rgba(255,200,0,0.5); }
+
+    /* Status bar */
+    #status {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.65);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.12);
+      color: rgba(255,255,255,0.8);
+      border-radius: 10px;
+      padding: 5px 14px;
+      font-size: 12px;
+      z-index: 10;
+      letter-spacing: 0.03em;
+    }
+
+    /* Loading overlay */
+    #loading {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.85);
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      z-index: 20;
+      font-size: 14px;
+    }
+    #loading.hidden { display: none; }
+
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid rgba(255,255,255,0.15);
+      border-top-color: #4285f4;
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #loading-text { color: rgba(255,255,255,0.7); }
+  </style>
+</head>
+<body>
+
+<div id="container">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+</div>
+
+<div id="controls">
+  <!-- MoveNet models -->
+  <button class="model-btn active" data-model="movenet-lightning">Lightning</button>
+  <button class="model-btn" data-model="movenet-thunder">Thunder</button>
+  <div class="divider"></div>
+  <!-- MediaPipe models -->
+  <button class="model-btn" data-model="mediapipe-lite">MP Lite</button>
+  <button class="model-btn" data-model="mediapipe-full">MP Full</button>
+  <button class="model-btn" data-model="mediapipe-heavy">MP Heavy</button>
+  <div class="divider"></div>
+  <!-- Utilities -->
+  <button class="icon-btn active" id="hand-btn" title="手の検出">✋</button>
+  <button class="icon-btn active" id="face-btn" title="顔の検出">😊</button>
+  <button class="icon-btn" id="mirror-btn" title="ミラー">⇆</button>
+  <button class="icon-btn" id="flip-btn" title="カメラ切替">📷</button>
+</div>
+
+<div id="status">読み込み中...</div>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <div id="loading-text">カメラを起動中...</div>
+</div>
+
+<!-- TF.js core + WebGL backend + pose-detection -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.22.0/dist/tf-core.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.22.0/dist/tf-backend-webgl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.22.0/dist/tf-converter.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+
+<script type="module">
+  // --- Config ---
+  const MP_MODELS = {
+    'mediapipe-lite':  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+    'mediapipe-full':  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task',
+    'mediapipe-heavy': 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task',
+  };
+  const MP_WASM      = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
+  const MP_CDN       = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+  const HAND_MODEL   = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+  const FACE_MODEL   = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+
+  // MoveNet: 17 keypoints (face points omitted — handled by Face Landmarker)
+  const MOVENET_EDGES = [
+    [5,6],                             // shoulders
+    [5,7],[7,9],[6,8],[8,10],          // arms
+    [5,11],[6,12],[11,12],             // torso
+    [11,13],[13,15],[12,14],[14,16],   // legs
+  ];
+
+  // Hand Landmarker: 21 landmarks per hand
+  const HAND_EDGES = [
+    [0,1],[1,2],[2,3],[3,4],           // thumb
+    [0,5],[5,6],[6,7],[7,8],           // index
+    [0,9],[9,10],[10,11],[11,12],      // middle
+    [0,13],[13,14],[14,15],[15,16],    // ring
+    [0,17],[17,18],[18,19],[19,20],    // pinky
+    [5,9],[9,13],[13,17],              // palm
+  ];
+
+  // MediaPipe: 33 landmarks (face/lip points omitted — handled by Face Landmarker)
+  const MP_EDGES = [
+    [11,12],                                            // shoulders
+    [11,13],[13,15],[15,17],[15,19],[17,19],            // left arm
+    [12,14],[14,16],[16,18],[16,20],[18,20],            // right arm
+    [11,23],[12,24],[23,24],                            // torso
+    [23,25],[25,27],[27,29],[27,31],[29,31],            // left leg
+    [24,26],[26,28],[28,30],[28,32],[30,32],            // right leg
+  ];
+
+  // --- DOM ---
+  const video      = document.getElementById('video');
+  const canvas     = document.getElementById('canvas');
+  const ctx        = canvas.getContext('2d');
+  const loadingEl  = document.getElementById('loading');
+  const loadingTxt = document.getElementById('loading-text');
+  const statusEl   = document.getElementById('status');
+  const mirrorBtn  = document.getElementById('mirror-btn');
+  const flipBtn    = document.getElementById('flip-btn');
+  const handBtn    = document.getElementById('hand-btn');
+  const faceBtn    = document.getElementById('face-btn');
+  const modelBtns  = document.querySelectorAll('.model-btn');
+
+  // --- State ---
+  let detector          = null;
+  let poseLandmarker    = null;
+  let handLandmarker    = null;
+  let faceLandmarker    = null;
+  let PoseLandmarkerClass = null;
+  let HandLandmarkerClass = null;
+  let FaceLandmarkerClass = null;
+  let faceFeatureGroups   = null;
+  let currentModel      = 'movenet-lightning';
+  let handEnabled       = true;
+  let faceEnabled       = true;
+  let rafId             = null;
+  let lastTs            = 0;
+  let fps               = 0;
+  let mirrored          = false;
+  let facingMode        = 'user';
+  let currentStream     = null;
+
+  // --- Camera ---
+  async function startCamera() {
+    if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+    currentStream = stream;
+    video.srcObject = stream;
+    await new Promise(res => { video.onloadedmetadata = res; });
+    await video.play();
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+  }
+
+  // --- MediaPipe lazy load ---
+  async function loadMediaPipe() {
+    if (PoseLandmarkerClass && HandLandmarkerClass && FaceLandmarkerClass) return;
+    const { PoseLandmarker, HandLandmarker, FaceLandmarker, FilesetResolver } = await import(MP_CDN);
+    PoseLandmarkerClass = PoseLandmarker;
+    HandLandmarkerClass = HandLandmarker;
+    FaceLandmarkerClass = FaceLandmarker;
+    window._mpFilesetResolver = FilesetResolver;
+    // Cache face feature connection groups (uses static props on FaceLandmarker)
+    // Face oval: hardcoded landmark indices (reliable across versions)
+    const OVAL_IDX = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109,10];
+    const ovalConns = [];
+    for (let i = 0; i < OVAL_IDX.length - 1; i++)
+      ovalConns.push({ start: OVAL_IDX[i], end: OVAL_IDX[i + 1] });
+
+    const tesselation = FaceLandmarker.FACE_LANDMARKS_TESSELATION ?? [];
+    const leftEye     = FaceLandmarker.FACE_LANDMARKS_LEFT_EYE      ?? [];
+    const rightEye    = FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE     ?? [];
+    const leftBrow    = FaceLandmarker.FACE_LANDMARKS_LEFT_EYEBROW  ?? [];
+    const rightBrow   = FaceLandmarker.FACE_LANDMARKS_RIGHT_EYEBROW ?? [];
+    const lips        = FaceLandmarker.FACE_LANDMARKS_LIPS          ?? [];
+    const leftIris    = FaceLandmarker.FACE_LANDMARKS_LEFT_IRIS     ?? [];
+    const rightIris   = FaceLandmarker.FACE_LANDMARKS_RIGHT_IRIS    ?? [];
+
+    console.log('[face] tesselation:', tesselation.length, 'oval:', ovalConns.length,
+      'leftEye:', leftEye.length, 'lips:', lips.length);
+
+    faceFeatureGroups = [
+      { conns: tesselation, color: 'rgba(100,200,255,0.4)', width: 1 },
+      { conns: ovalConns,   color: '#ffffff',               width: 2 },
+      { conns: leftEye,     color: '#4dd9ff', width: 2.5 },
+      { conns: rightEye,    color: '#4dd9ff', width: 2.5 },
+      { conns: leftBrow,    color: '#ffd93d', width: 2.5 },
+      { conns: rightBrow,   color: '#ffd93d', width: 2.5 },
+      { conns: lips,        color: '#ff6b9d', width: 2.5 },
+      { conns: leftIris,    color: '#a0c4ff', width: 2.5 },
+      { conns: rightIris,   color: '#a0c4ff', width: 2.5 },
+    ];
+  }
+
+  async function getMPFileset() {
+    await loadMediaPipe();
+    return window._mpFilesetResolver.forVisionTasks(MP_WASM);
+  }
+
+  async function loadHandLandmarker() {
+    handLandmarker?.close();
+    handLandmarker = null;
+    const fileset = await getMPFileset();
+    handLandmarker = await HandLandmarkerClass.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: HAND_MODEL, delegate: 'GPU' },
+      runningMode: 'VIDEO',
+      numHands: 2,
+      minHandDetectionConfidence: 0.5,
+      minHandPresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+  }
+
+  async function loadFaceLandmarker() {
+    faceLandmarker?.close();
+    faceLandmarker = null;
+    const fileset = await getMPFileset();
+    faceLandmarker = await FaceLandmarkerClass.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: FACE_MODEL, delegate: 'CPU' },
+      runningMode: 'IMAGE',
+      numFaces: 2,
+      minFaceDetectionConfidence: 0.2,
+      outputFaceBlendshapes: false,
+    });
+  }
+
+  // --- Model loading ---
+  async function loadModel(key) {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    detector?.dispose?.();   detector = null;
+    poseLandmarker?.close(); poseLandmarker = null;
+    handLandmarker?.close(); handLandmarker = null;
+    faceLandmarker?.close(); faceLandmarker = null;
+
+    showLoading('モデルを読み込み中…');
+    setBtnsDisabled(true);
+
+    try {
+      if (key.startsWith('movenet')) {
+        await tf.setBackend('webgl');
+        const type = key === 'movenet-lightning'
+          ? poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING
+          : poseDetection.movenet.modelType.SINGLEPOSE_THUNDER;
+        detector = await poseDetection.createDetector(
+          poseDetection.SupportedModels.MoveNet, { modelType: type }
+        );
+      } else {
+        const fileset = await getMPFileset();
+        poseLandmarker = await PoseLandmarkerClass.createFromOptions(fileset, {
+          baseOptions: { modelAssetPath: MP_MODELS[key], delegate: 'GPU' },
+          runningMode: 'VIDEO',
+          numPoses: 2,
+        });
+      }
+
+      if (handEnabled) await loadHandLandmarker();
+      if (faceEnabled) await loadFaceLandmarker();
+
+      currentModel = key;
+      hideLoading();
+      setBtnsDisabled(false);
+      startLoop();
+    } catch (err) {
+      loadingTxt.textContent = 'エラー: ' + err.message;
+      setBtnsDisabled(false);
+      console.error(err);
+    }
+  }
+
+  // --- Draw helpers ---
+  function dot(x, y, r, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function line(x1, y1, x2, y2, color, width = 2) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+
+  function drawMoveNet(poses) {
+    if (!poses?.length) return;
+    const kp = poses[0].keypoints;
+    for (const [i, j] of MOVENET_EDGES) {
+      const a = kp[i], b = kp[j];
+      if ((a.score ?? 1) > 0.3 && (b.score ?? 1) > 0.3)
+        line(a.x, a.y, b.x, b.y, '#00e87a');
+    }
+    // skip indices 0-4 (nose/eyes/ears) — covered by Face Landmarker
+    for (let i = 5; i < kp.length; i++) {
+      const p = kp[i];
+      if ((p.score ?? 1) > 0.3) dot(p.x, p.y, 4, '#ff4455');
+    }
+  }
+
+  function drawMediaPipe(results) {
+    if (!results?.landmarks?.length) return;
+    const w = canvas.width, h = canvas.height;
+    for (const lms of results.landmarks) {
+      for (const [i, j] of MP_EDGES) {
+        const a = lms[i], b = lms[j];
+        if (a && b && (a.visibility ?? 1) > 0.3 && (b.visibility ?? 1) > 0.3)
+          line(a.x * w, a.y * h, b.x * w, b.y * h, '#00ccff');
+      }
+      for (const p of lms) {
+        if ((p.visibility ?? 1) > 0.3) dot(p.x * w, p.y * h, 4, '#ffaa00');
+      }
+    }
+  }
+
+  // Normalize MediaPipe connection: handles both {start,end} and [s,e] formats
+  function connPair(c) {
+    return Array.isArray(c) ? c : [c.start, c.end];
+  }
+
+  let _faceDbgCount = 0;
+
+  function strokeConns(lms, conns, color, width, w, h, chunkSize = 500) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    let drawn = 0;
+    for (let start = 0; start < conns.length; start += chunkSize) {
+      ctx.beginPath();
+      const end = Math.min(start + chunkSize, conns.length);
+      for (let k = start; k < end; k++) {
+        const [si, ei] = connPair(conns[k]);
+        const a = lms[si], b = lms[ei];
+        if (!a || !b) continue;
+        const ax = a.x * w, ay = a.y * h, bx = b.x * w, by = b.y * h;
+        if (!isFinite(ax) || !isFinite(ay) || !isFinite(bx) || !isFinite(by)) continue;
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
+        drawn++;
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+    return drawn;
+  }
+
+  function drawFace(results) {
+    if (_faceDbgCount < 60) {
+      _faceDbgCount++;
+      if (_faceDbgCount % 10 === 0)
+        console.log(`[face] frame ${_faceDbgCount}: detected=${results?.faceLandmarks?.length ?? 0}`);
+    }
+    if (!results?.faceLandmarks?.length || !faceFeatureGroups) return;
+    const w = canvas.width, h = canvas.height;
+    for (const lms of results.faceLandmarks) {
+      for (const { conns, color, width } of faceFeatureGroups) {
+        if (!conns?.length) continue;
+        strokeConns(lms, conns, color, width, w, h);
+      }
+    }
+  }
+
+  // Finger colors per hand
+  const FINGER_COLORS = ['#ff6b6b', '#ffd93d', '#6bcb77', '#4d96ff', '#c77dff'];
+
+  function drawHands(results) {
+    if (!results?.landmarks?.length) return;
+    const w = canvas.width, h = canvas.height;
+    for (let hi = 0; hi < results.landmarks.length; hi++) {
+      const lms = results.landmarks[hi];
+      // edges per finger with distinct colors
+      const fingerGroups = [
+        { edges: [[0,1],[1,2],[2,3],[3,4]], color: FINGER_COLORS[0] },           // thumb
+        { edges: [[0,5],[5,6],[6,7],[7,8]], color: FINGER_COLORS[1] },           // index
+        { edges: [[0,9],[9,10],[10,11],[11,12]], color: FINGER_COLORS[2] },      // middle
+        { edges: [[0,13],[13,14],[14,15],[15,16]], color: FINGER_COLORS[3] },    // ring
+        { edges: [[0,17],[17,18],[18,19],[19,20]], color: FINGER_COLORS[4] },    // pinky
+        { edges: [[5,9],[9,13],[13,17]], color: 'rgba(255,255,255,0.5)' },       // palm
+      ];
+      for (const { edges, color } of fingerGroups) {
+        for (const [i, j] of edges) {
+          const a = lms[i], b = lms[j];
+          if (a && b) line(a.x * w, a.y * h, b.x * w, b.y * h, color, 2);
+        }
+      }
+      for (const p of lms) dot(p.x * w, p.y * h, 3, '#ffffff');
+    }
+  }
+
+  // --- Detection loop ---
+  function startLoop() {
+    let fpsTs = 0;
+    let busy = false;
+
+    async function tick(ts) {
+      // Skip frame if previous inference is still running (prevents pile-up)
+      if (busy) { rafId = requestAnimationFrame(tick); return; }
+      if (video.readyState < 2) { rafId = requestAnimationFrame(tick); return; }
+
+      busy = true;
+      try {
+        // FPS
+        const dt = ts - lastTs;
+        if (dt > 0) fps = Math.round(1000 / dt);
+        lastTs = ts;
+        if (ts - fpsTs > 500) {
+          const extras = [handLandmarker && '✋', faceLandmarker && '😊'].filter(Boolean).join(' ');
+          statusEl.textContent = `${fps} FPS  |  ${currentModel}${extras ? '  ' + extras : ''}`;
+          fpsTs = ts;
+        }
+
+        // Draw clean frame onto canvas first
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // Run all detections before drawing any overlays
+        let poseRes = null, handRes = null, faceRes = null;
+        try {
+          if (detector)           poseRes = await detector.estimatePoses(video);
+          else if (poseLandmarker) poseRes = poseLandmarker.detectForVideo(video, ts);
+        } catch (e) { console.error('[pose]', e); }
+        try {
+          if (handLandmarker) handRes = handLandmarker.detectForVideo(canvas, ts);
+        } catch (e) { console.error('[hand]', e); }
+        try {
+          if (faceLandmarker) faceRes = faceLandmarker.detect(canvas);
+        } catch (e) { console.error('[face]', e); }
+
+        // Draw overlays
+        if (poseRes) { detector ? drawMoveNet(poseRes) : drawMediaPipe(poseRes); }
+        if (handRes) drawHands(handRes);
+        if (faceRes) drawFace(faceRes);
+
+      } finally {
+        busy = false;
+        rafId = requestAnimationFrame(tick);
+      }
+    }
+
+    rafId = requestAnimationFrame(tick);
+  }
+
+  // --- UI helpers ---
+  function showLoading(msg) {
+    loadingTxt.textContent = msg;
+    loadingEl.classList.remove('hidden');
+  }
+  function hideLoading() { loadingEl.classList.add('hidden'); }
+  function setBtnsDisabled(v) { modelBtns.forEach(b => b.disabled = v); }
+
+  // --- Event listeners ---
+  modelBtns.forEach(btn => btn.addEventListener('click', () => {
+    modelBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    loadModel(btn.dataset.model);
+  }));
+
+  faceBtn.addEventListener('click', async () => {
+    faceEnabled = !faceEnabled;
+    faceBtn.classList.toggle('active', faceEnabled);
+    if (faceEnabled) {
+      showLoading('顔の検出モデルを読み込み中…');
+      setBtnsDisabled(true);
+      try {
+        await loadFaceLandmarker();
+      } catch (err) {
+        loadingTxt.textContent = 'エラー: ' + err.message;
+        faceEnabled = false;
+        faceBtn.classList.remove('active');
+        setBtnsDisabled(false);
+        return;
+      }
+      hideLoading();
+      setBtnsDisabled(false);
+    } else {
+      faceLandmarker?.close();
+      faceLandmarker = null;
+    }
+  });
+
+  handBtn.addEventListener('click', async () => {
+    handEnabled = !handEnabled;
+    handBtn.classList.toggle('active', handEnabled);
+    if (handEnabled) {
+      showLoading('手の検出モデルを読み込み中…');
+      setBtnsDisabled(true);
+      try {
+        await loadHandLandmarker();
+      } catch (err) {
+        loadingTxt.textContent = 'エラー: ' + err.message;
+        handEnabled = false;
+        handBtn.classList.remove('active');
+        setBtnsDisabled(false);
+        return;
+      }
+      hideLoading();
+      setBtnsDisabled(false);
+    } else {
+      handLandmarker?.close();
+      handLandmarker = null;
+    }
+  });
+
+  mirrorBtn.addEventListener('click', () => {
+    mirrored = !mirrored;
+    canvas.classList.toggle('mirrored', mirrored);
+    mirrorBtn.classList.toggle('active', mirrored);
+  });
+
+  flipBtn.addEventListener('click', async () => {
+    facingMode = facingMode === 'user' ? 'environment' : 'user';
+    showLoading('カメラを切替中…');
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    await startCamera();
+    if (handEnabled && handLandmarker) {
+      handLandmarker.close();
+      await loadHandLandmarker();
+    }
+    if (faceEnabled && faceLandmarker) {
+      faceLandmarker.close();
+      await loadFaceLandmarker();
+    }
+    hideLoading();
+    startLoop();
+  });
+
+  // --- Boot ---
+  (async () => {
+    try {
+      showLoading('カメラを起動中…');
+      await startCamera();
+      await loadModel('movenet-lightning');
+    } catch (err) {
+      loadingTxt.textContent = 'エラー: ' + err.message;
+      console.error(err);
+    }
+  })();
+</script>
+</body>
+</html>
